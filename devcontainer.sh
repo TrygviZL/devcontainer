@@ -66,17 +66,14 @@ while getopts "$optspec" opt; do
     esac
 done
 
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
 
-WORKSPACE="${*:$OPTIND:1}"
-WORKSPACE="${WORKSPACE:-$PWD}"
-
-if [[ ! -d "$WORKSPACE" ]]; then
-    echo "Directory $WORKSPACE does not exist!" >&2
+if [[ ! -d "$PROJECT_ROOT" ]]; then
+    echo "Directory $PROJECT_ROOT does not exist!" >&2
     exit 6
 fi
 
-
-echo "Using workspace ${WORKSPACE}"
+echo "Using workspace ${PROJECT_ROOT}"
 
 CONFIG_DIR=./.devcontainer
 debug "CONFIG_DIR: ${CONFIG_DIR}"
@@ -144,11 +141,14 @@ debug "PORTS: ${PORTS}"
 ENVS=$(echo "$CONFIG" | jq -r '.remoteEnv | to_entries? | map("-e \(.key)=\(.value)")? | join(" ")')
 debug "ENVS: ${ENVS}"
 
-WORK_DIR="/workspace"
-debug "WORK_DIR: ${WORK_DIR}"
+TARGET_PROJECT_ROOT="/workspace/$(basename $PROJECT_ROOT)"
+debug "TARGET_PROJECT_ROOT: ${TARGET_PROJECT_ROOT}"
 
-MOUNT="${MOUNT} --mount type=bind,source=${WORKSPACE},target=${WORK_DIR}"
-debug "MOUNT: ${MOUNT}"
+MOUNT="${MOUNT} --mount type=bind,source=${PROJECT_ROOT},target=${TARGET_PROJECT_ROOT}"
+debug "MOUNT: ${TARGET_PROJECT_ROOT}"
+
+WORK_DIR=$(echo "$TARGET_PROJECT_ROOT${PWD#"$PROJECT_ROOT"}")
+debug "WORK_DIR: ${WORK_DIR}"
 
 echo "Building and starting container"
 
