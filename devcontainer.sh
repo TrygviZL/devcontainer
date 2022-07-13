@@ -133,6 +133,9 @@ ARGS=$(echo "$CONFIG" | jq -r '.build.args | to_entries? | map("--build-arg \(.k
 debug "ARGS: ${ARGS}"
 
 SHELL=$(echo "$CONFIG" | jq -r '.settings."terminal.integrated.shell.linux"')
+if [ "$SHELL" == "null" ]; then
+    SHELL="/bin/bash"
+fi
 debug "SHELL: ${SHELL}"
 
 PORTS=$(echo "$CONFIG" | jq -r '.forwardPorts | map("-p \(.):\(.)")? | join(" ")')
