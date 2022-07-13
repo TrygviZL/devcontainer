@@ -183,7 +183,9 @@ if [ $SHOULD_RUN_POST_ACTIONS ]; then
     echo "running post actions...";
 
     CONFIGURE_USER_ID="\
-    if [ '$REMOTE_USER' != '' ] && command -v usermod &>/dev/null; \
+    REMOTE_PUID=\$(id -u); \
+    REMOTE_PGID=\$(id -g); \
+    if [ '$REMOTE_USER' != '' ] && command -v usermod &>/dev/null && [ \"$PUID\" != \"\$REMOTE_PUID\" ] && [ \"$PGID\" != \"\$REMOTE_PGID\" ]; \
     then \
         sudo=''
         if [ \"$(stat -f -c '%u' "$(which sudo)")\" = '0' ]; then
