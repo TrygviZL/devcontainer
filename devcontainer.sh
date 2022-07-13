@@ -141,6 +141,9 @@ debug "SHELL: ${SHELL}"
 PORTS=$(echo "$CONFIG" | jq -r '.forwardPorts | map("-p \(.):\(.)")? | join(" ")')
 debug "PORTS: ${PORTS}"
 
+POST_CREATE_COMMAND=$(echo "$CONFIG" | jq -r .postCreateCommand)
+debug "POST_CREATE_COMMAND: ${POST_CREATE_COMMAND}"
+
 ENVS=$(echo "$CONFIG" | jq -r '.remoteEnv | to_entries? | map("-e \(.key)=\(.value)")? | join(" ")')
 debug "ENVS: ${ENVS}"
 
@@ -156,6 +159,10 @@ debug "WORK_DIR: ${WORK_DIR}"
 echo "Building and starting container"
 
 DOCKER_TAG=$(echo "$DOCKER_FILE" | md5sum - | awk '{ print $1 }')
+
+# Check if tag already exists, if not than do post actions after build.
+(docker inspect --type=image $DOCKER_TAG 2> /dev/null && SHOULD_RUN_POST_ACTIONS=0 || SHOULD_RUN_POST_ACTIONS=1) > /dev/null
+
 # shellcheck disable=SC2086
 BUILD_OUTPUT=$(docker build -f "$DOCKER_FILE" -t "$DOCKER_TAG" $ARGS .)
 build_status=$?
@@ -172,19 +179,26 @@ set -e
 PUID=$(id -u)
 PGID=$(id -g)
 
+if [ $SHOULD_RUN_POST_ACTIONS ]; then
+    echo "running post actions...";
+
+    CONFIGURE_USER_ID="\
+    if [ '$REMOTE_USER' != '' ] && command -v usermod &>/dev/null; \
+    then \
+        sudo=''
+        if [ \"$(stat -f -c '%u' "$(which sudo)")\" = '0' ]; then
+            sudo=sudo
+        fi;
+        \$sudo usermod -u $PUID $REMOTE_USER && \
+        \$sudo groupmod -g $PGID $REMOTE_USER && \
+        \$sudo passwd -d $REMOTE_USER && \
+        \$sudo chown $REMOTE_USER:$REMOTE_USER -R ~$REMOTE_USER $TARGET_PROJECT_ROOT; \
+    fi;"
+
+    docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" "$SHELL" -c "$CONFIGURE_USER_ID"
+    docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" $POST_CREATE_COMMAND
+fi
+
 # shellcheck disable=SC2086
-docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" "$SHELL" -c "\
-if [ '$REMOTE_USER' != '' ] && command -v usermod &>/dev/null; \
-then \
-    sudo=''
-    if [ \"$(stat -f -c '%u' "$(which sudo)")\" = '0' ]; then
-        sudo=sudo
-    fi
-    \$sudo usermod -u $PUID $REMOTE_USER && \
-    \$sudo groupmod -g $PGID $REMOTE_USER && \
-    \$sudo passwd -d $REMOTE_USER && \
-    \$sudo chown $REMOTE_USER:$REMOTE_USER -R ~$REMOTE_USER $WORK_DIR && \
-    su $REMOTE_USER -s $SHELL; \
-else \
-    $SHELL; \
-fi"
+
+docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" "$SHELL"
