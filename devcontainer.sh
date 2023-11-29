@@ -66,17 +66,14 @@ while getopts "$optspec" opt; do
     esac
 done
 
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
 
-WORKSPACE="${*:$OPTIND:1}"
-WORKSPACE="${WORKSPACE:-$PWD}"
-
-if [[ ! -d "$WORKSPACE" ]]; then
-    echo "Directory $WORKSPACE does not exist!" >&2
+if [[ ! -d "$PROJECT_ROOT" ]]; then
+    echo "Directory $PROJECT_ROOT does not exist!" >&2
     exit 6
 fi
 
-
-echo "Using workspace ${WORKSPACE}"
+echo "Using workspace ${PROJECT_ROOT}"
 
 CONFIG_DIR=./.devcontainer
 debug "CONFIG_DIR: ${CONFIG_DIR}"
@@ -84,8 +81,15 @@ debug "CONFIG_DIR: ${CONFIG_DIR}"
 CONFIG_FILE=devcontainer.json
 debug "CONFIG_FILE: ${CONFIG_FILE}"
 if ! [ -e "$CONFIG_DIR/$CONFIG_FILE" ]; then
-    echo "Folder contains no devcontainer configuration"
-    exit
+    # Config file may also be ".devcontainer.json" on the project folder.
+    CONFIG_DIR=.
+    debug "CONFIG_DIR: ${CONFIG_DIR}"
+    CONFIG_FILE=.devcontainer.json
+    debug "CONFIG_FILE: ${CONFIG_FILE}"
+    if ! [ -e "$CONFIG_DIR/$CONFIG_FILE" ]; then
+        echo "Folder contains no devcontainer configuration"
+        exit
+    fi
 fi
 
 CONFIG="$(cat "$CONFIG_DIR/$CONFIG_FILE")"
@@ -129,26 +133,40 @@ ARGS=$(echo "$CONFIG" | jq -r '.build.args | to_entries? | map("--build-arg \(.k
 debug "ARGS: ${ARGS}"
 
 SHELL=$(echo "$CONFIG" | jq -r '.settings."terminal.integrated.shell.linux"')
+if [ "$SHELL" == "null" ]; then
+    SHELL="/bin/bash"
+fi
 debug "SHELL: ${SHELL}"
 
 PORTS=$(echo "$CONFIG" | jq -r '.forwardPorts | map("-p \(.):\(.)")? | join(" ")')
 debug "PORTS: ${PORTS}"
 
+POST_CREATE_COMMAND=$(echo "$CONFIG" | jq -r .postCreateCommand)
+debug "POST_CREATE_COMMAND: ${POST_CREATE_COMMAND}"
+
 ENVS=$(echo "$CONFIG" | jq -r '.remoteEnv | to_entries? | map("-e \(.key)=\(.value)")? | join(" ")')
 debug "ENVS: ${ENVS}"
 
-WORK_DIR="/workspace"
-debug "WORK_DIR: ${WORK_DIR}"
+TARGET_PROJECT_ROOT="/workspace/$(basename $PROJECT_ROOT)"
+debug "TARGET_PROJECT_ROOT: ${TARGET_PROJECT_ROOT}"
 
-MOUNT="${MOUNT} --mount type=bind,source=${WORKSPACE},target=${WORK_DIR}"
-debug "MOUNT: ${MOUNT}"
+MOUNT="${MOUNT} --mount type=bind,source=${PROJECT_ROOT},target=${TARGET_PROJECT_ROOT}"
+debug "MOUNT: ${TARGET_PROJECT_ROOT}"
+
+WORK_DIR=$(echo "$TARGET_PROJECT_ROOT${PWD#"$PROJECT_ROOT"}")
+debug "WORK_DIR: ${WORK_DIR}"
 
 echo "Building and starting container"
 
 DOCKER_TAG=$(echo "$DOCKER_FILE" | md5sum - | awk '{ print $1 }')
+
+# Check if tag already exists, if not than do post actions after build.
+(docker inspect --type=image $DOCKER_TAG 2> /dev/null && SHOULD_RUN_POST_ACTIONS=0 || SHOULD_RUN_POST_ACTIONS=1) > /dev/null
+
 # shellcheck disable=SC2086
-docker build -f "$DOCKER_FILE" -t "$DOCKER_TAG" $ARGS .
+BUILD_OUTPUT=$(docker build -f "$DOCKER_FILE" -t "$DOCKER_TAG" $ARGS .)
 build_status=$?
+debug $BUILD_OUTPUT
 
 if [[ $build_status -ne 0 ]]; then
     echo "Building docker image failed..." >&2
@@ -161,19 +179,28 @@ set -e
 PUID=$(id -u)
 PGID=$(id -g)
 
+if [ $SHOULD_RUN_POST_ACTIONS ]; then
+    echo "running post actions...";
+
+    CONFIGURE_USER_ID="\
+    REMOTE_PUID=\$(id -u); \
+    REMOTE_PGID=\$(id -g); \
+    if [ '$REMOTE_USER' != '' ] && command -v usermod &>/dev/null && [ \"$PUID\" != \"\$REMOTE_PUID\" ] && [ \"$PGID\" != \"\$REMOTE_PGID\" ]; \
+    then \
+        sudo=''
+        if [ \"$(stat -f -c '%u' "$(which sudo)")\" = '0' ]; then
+            sudo=sudo
+        fi;
+        \$sudo usermod -u $PUID $REMOTE_USER && \
+        \$sudo groupmod -g $PGID $REMOTE_USER && \
+        \$sudo passwd -d $REMOTE_USER && \
+        \$sudo chown $REMOTE_USER:$REMOTE_USER -R ~$REMOTE_USER $TARGET_PROJECT_ROOT; \
+    fi;"
+
+    docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" "$SHELL" -c "$CONFIGURE_USER_ID"
+    docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" $POST_CREATE_COMMAND
+fi
+
 # shellcheck disable=SC2086
-docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" "$SHELL" -c "\
-if [ '$REMOTE_USER' != '' ] && command -v usermod &>/dev/null; \
-then \
-    sudo=''
-    if [ \"$(stat -f -c '%u' "$(which sudo)")\" = '0' ]; then
-        sudo=sudo
-    fi
-    \$sudo usermod -u $PUID $REMOTE_USER && \
-    \$sudo groupmod -g $PGID $REMOTE_USER && \
-    \$sudo passwd -d $REMOTE_USER && \
-    \$sudo chown $REMOTE_USER:$REMOTE_USER -R ~$REMOTE_USER $WORK_DIR && \
-    su $REMOTE_USER -s $SHELL; \
-else \
-    $SHELL; \
-fi"
+
+docker run -it $DOCKER_OPTS $PORTS $ENVS $MOUNT -w "$WORK_DIR" "$DOCKER_TAG" "$SHELL"
